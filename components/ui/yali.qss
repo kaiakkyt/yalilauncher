@@ -1,0 +1,69 @@
+QPushButton {
+  background-color: #2a2a2a;
+  color: #f0f0f0;
+  padding: 6px 10px;
+  border-radius: 4px;
+  border: none;
+}
+QPushButton:hover { background-color: #333333; }
+QPushButton:disabled { background-color: #2b2b2b; color: #7a7a7a; }
+
+QPushButton#downloadButton, QPushButton#startButton, QPushButton#addAddonButton, QPushButton#saveSettingsButton {
+  background-color: #3fa34d;
+  color: white;
+}
+QPushButton#downloadButton:hover, QPushButton#startButton:hover, QPushButton#addAddonButton:hover, QPushButton#saveSettingsButton:hover {
+  background-color: #37a046;
+}
+
+QPushButton#stopButton, QPushButton#removeAddonButton, QPushButton#deleteWorldButton {
+  background-color: #c94b4b;
+  color: white;
+}
+QPushButton#stopButton:hover, QPushButton#removeAddonButton:hover, QPushButton#deleteWorldButton:hover { background-color: #b63f3f; }
+
+QPushButton#refreshButton, QPushButton#modrinthSearchButton, QPushButton#openFolderButton {
+  background-color: #3a3a3a;
+  color: #efefef;
+}
+
+QPushButton#refreshButton:hover, QPushButton#modrinthSearchButton:hover, QPushButton#openFolderButton:hover { background-color: #444444; }
+
+/* Consolidated text + status rules (semi-transparent)
+   - Removed duplicate/invalid color formats and consolidated into one block
+   - Use rgba() consistently so transparency is applied predictably
+*/
+
+/* General semi-transparent text rules - applies default text color across common widgets */
+QWidget, QLabel, QLineEdit, QComboBox, QSpinBox, QTabBar, QGroupBox, QListWidget, QPlainTextEdit, QTextEdit {
+  color: rgba(240,240,240,235);
+}
+
+/* Explicit title/subtitle/infoLabel rules so the important header text is semi-transparent */
+QLabel#titleLabel {
+  color: rgba(240,240,240,220);
+}
+
+QLabel#subtitleLabel {
+  color: rgba(240,240,240,050);
+  font-size: 10pt;
+}
+
+QLabel[class="infoLabel"] {
+  color: rgba(240,240,240,050);
+}
+
+/* Secondary / status labels use slightly lower opacity so they read as subdued */
+QLabel#statusLabel, QLabel#settingsStatus, QLabel#addonsStatus, QLabel#worldStatus, QLabel#noServerLabel, QLabel#noServerDir {
+  padding: 3px;
+  color: rgba(154,160,166,050);
+}
+
+/* Keep the programmatic state colors but make them slightly softened (semi-transparent) */
+QLabel[state="ok"] { color: rgba(63,163,77,242); }
+QLabel[state="warn"] { color: rgba(255,165,0,242); }
+QLabel[state="error"] { color: rgba(201,75,75,242); }
+QLabel[state="idle"] { color: rgba(154,160,166,199); }
+
+/* End label rules */
+
