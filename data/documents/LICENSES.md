@@ -31,7 +31,8 @@ YaliLauncher uses various external API's for server downloading and addon downlo
 - BungeeCord Jenkins
 - Forge Maven
 - NeoForge Maven
-- Modrinth (to download plugins/mods)
+- Modrinth (to search and download plugins/mods)
+- Adoptium (to install Java)
 
 ## 4. Audio
 The UI click sound was found on [GameDevMarket](https://www.gamedevmarket.net/asset/free-ui-click-sound-effects-pack) but heavily modified by me!

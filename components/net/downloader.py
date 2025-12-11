@@ -7,9 +7,9 @@ for the underlying requests session so retry behaviour is shared.
 import os
 import hashlib
 from typing import Optional, Callable
-from . import http
+from . import https
 
-ProgressCallback = Optional[Callable[[int, int], None]]  # downloaded, total
+ProgressCallback = Optional[Callable[[int, int], None]]
 
 
 def _sha256_of_file(path: str, chunk_size: int = 65536) -> str:
@@ -30,7 +30,7 @@ def download_file(url: str, dest_path: str, progress_cb: ProgressCallback = None
 	tmp = dest_path + '.part'
 	os.makedirs(os.path.dirname(dest_path) or '.', exist_ok=True)
 
-	resp = http.get(url, stream=True, timeout=timeout)
+	resp = https.get(url, stream=True, timeout=timeout)
 	resp.raise_for_status()
 
 	total = int(resp.headers.get('content-length') or 0)

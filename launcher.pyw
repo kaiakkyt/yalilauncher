@@ -37,8 +37,7 @@ import zipfile
 from datetime import datetime
 import time
 import html
-from components.net import http, downloader
-
+from components.net import https as http, downloader, java as temurin
 
 class ScrollableComboBox(QComboBox):
     """QComboBox that limits popup height to maxVisibleItems so it scrolls reliably.
@@ -118,7 +117,6 @@ class ScrollableComboBox(QComboBox):
                 pass
         except Exception:
             pass
-
 
 def get_base_dir():
     try:
@@ -356,12 +354,13 @@ class DownloadThread(QThread):
     progress_signal = pyqtSignal(int, str)
     finished_signal = pyqtSignal(bool, str)
     
-    def __init__(self, version, software, directory, ram):
+    def __init__(self, version, software, directory, ram, java_exe: str | None = None):
         super().__init__()
         self.version = version
         self.software = software
         self.directory = directory
         self.ram = ram
+        self.java_exe = java_exe
         
     def log(self, message):
         """Send log message to UI"""
@@ -400,11 +399,20 @@ class DownloadThread(QThread):
             if jar_path:
                 self.log("\n[INFO] Creating server files...")
                 self.create_eula_file(jar_path)
-                self.create_start_batch(jar_path)
+                self.create_start_batch(jar_path, getattr(self, 'java_exe', None) or getattr(self, 'java_exe', None))
                 self.create_plugin_mods_folder(jar_path)
                 self.install_axior_plugin(jar_path)
                 self.install_foliaperms_plugin(jar_path)
                 self.install_eventron_plugin(jar_path)
+                try:
+                    self.install_multimedia_plugin(jar_path)
+                except Exception:
+                    pass
+                try:
+                    if self.software == 'Fabric':
+                        self.install_fabric_api(jar_path)
+                except Exception:
+                    pass
                 self.finished_signal.emit(True, jar_path)
             else:
                 self.finished_signal.emit(False, "Download failed")
@@ -724,12 +732,45 @@ class DownloadThread(QThread):
         except Exception as e:
             self.log(f"[WARNING] Failed to create eula.txt: {e}")
             
-    def create_start_batch(self, jar_path):
+    def create_start_batch(self, jar_path, java_exe: str | None = None):
         """Create start.bat"""
         try:
             batch_path = os.path.join(os.path.dirname(jar_path), "start.bat")
             jar_name = os.path.basename(jar_path)
-            
+            exe = java_exe or getattr(self, 'java_exe', None) or os.environ.get('JAVA_EXEC') or 'java'
+            try:
+                if exe and os.path.isdir(exe):
+                    exe = os.path.join(exe, 'bin', 'java.exe' if sys.platform == 'win32' else 'java')
+            except Exception:
+                pass
+
+            try:
+                if not exe or (not os.path.isabs(exe)) or (isinstance(exe, str) and not os.path.exists(exe)):
+                    jh = os.environ.get('JAVA_HOME')
+                    if jh:
+                        candidate = os.path.join(jh, 'bin', 'java.exe' if sys.platform == 'win32' else 'java')
+                        if os.path.exists(candidate):
+                            exe = candidate
+                    if (not exe or not os.path.exists(exe)) and shutil is not None:
+                        try:
+                            found = shutil.which(exe) if exe else None
+                            if found:
+                                exe = found
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+            if isinstance(exe, str) and (' ' in exe or '\\' in exe or ('\\' in exe)):
+                if not (exe.startswith('"') and exe.endswith('"')):
+                    exe_quoted = f'"{exe}"'
+                else:
+                    exe_quoted = exe
+            else:
+                exe_quoted = exe
+
+            ram_val = f"{self.ram}G" if isinstance(self.ram, int) or (isinstance(self.ram, str) and self.ram.isdigit()) else str(self.ram)
+
             with open(batch_path, 'w') as f:
                 f.write(f"""@echo off
 title Minecraft Server - {self.version} {self.software}
@@ -743,7 +784,7 @@ echo ================================================
 echo.
 echo Starting server...
 echo.
-java -Xmx{self.ram} -Xms{self.ram} -jar "{jar_name}" nogui
+{exe_quoted} -Xmx{ram_val} -Xms{ram_val} -jar "{jar_name}" nogui
 echo.
 echo ================================================
 echo Server stopped!
@@ -776,87 +817,241 @@ pause
     def install_axior_plugin(self, jar_path):
         """Install Axior plugin based on server type"""
         try:
-            server_dir = os.path.dirname(jar_path)
-            
-            axior_file = None
-            plugin_folder = None
-            
-            if self.software in ["Bukkit", "Spigot", "Paper", "Purpur"]:
-                axior_file = "data/internal/setup_plugins/Axior/Axior-Bukkit-1.00.0.jar"
-                plugin_folder = os.path.join(server_dir, "plugins")
-            elif self.software == "Folia":
-                axior_file = "data/internal/setup_plugins/Axior/Axior-Folia-1.00.0.jar"
-                plugin_folder = os.path.join(server_dir, "plugins")
-            elif self.software in ["BungeeCord", "Waterfall"]:
-                axior_file = "data/internal/setup_plugins/Axior/Axior-BungeeCord-1.00.0.jar"
-                plugin_folder = os.path.join(server_dir, "plugins")
-            elif self.software == "Velocity":
-                axior_file = "data/internal/setup_plugins/Axior/Axior-Velocity-1.00.0.jar"
-                plugin_folder = os.path.join(server_dir, "plugins")
-            else:
-                return
-            
-            if not os.path.exists(axior_file):
-                self.log(f"[WARNING] Axior plugin not found at {axior_file}")
-                return
-            
-            os.makedirs(plugin_folder, exist_ok=True)
-            
-            import shutil
-            dest_file = os.path.join(plugin_folder, os.path.basename(axior_file))
-            shutil.copy2(axior_file, dest_file)
-            self.log(f"[SUCCESS] Installed {os.path.basename(axior_file)} plugin")
-            
+            sw = getattr(self, 'software', None)
+            platform_hint = None
+            if sw == 'Velocity':
+                platform_hint = 'velocity'
+            elif sw in ('BungeeCord', 'Waterfall'):
+                platform_hint = 'bungeecord'
+            elif sw == 'Folia':
+                platform_hint = 'folia'
+            elif sw in ('Bukkit', 'Spigot', 'Paper', 'Purpur'):
+                platform_hint = 'bukkit'
+
+            return self.install_plugin_from_modrinth('axior', jar_path, platform_hint=platform_hint)
         except Exception as e:
             self.log(f"[WARNING] Failed to install Axior plugin: {e}")
-    
+
     def install_foliaperms_plugin(self, jar_path):
-        """Install FoliaPerms plugin for Folia servers"""
+        """Install FoliaPerms plugin for Folia servers (Modrinth)"""
         try:
-            if self.software != "Folia":
-                return
-            
-            server_dir = os.path.dirname(jar_path)
-            foliaperms_file = "data/internal/setup_plugins/FoliaPerms-1.1.0.jar"
-            plugin_folder = os.path.join(server_dir, "plugins")
-            
-            if not os.path.exists(foliaperms_file):
-                self.log(f"[WARNING] FoliaPerms plugin not found at {foliaperms_file}")
-                return
-            
-            os.makedirs(plugin_folder, exist_ok=True)
-            
-            import shutil
-            dest_file = os.path.join(plugin_folder, os.path.basename(foliaperms_file))
-            shutil.copy2(foliaperms_file, dest_file)
-            self.log(f"[SUCCESS] Installed {os.path.basename(foliaperms_file)} plugin")
-            
+            if getattr(self, 'software', None) != 'Folia':
+                self.log(f"[INFO] FoliaPerms not applicable for {getattr(self, 'software', None)}; skipping")
+                return None
+            return self.install_plugin_from_modrinth('foliaperms', jar_path)
         except Exception as e:
             self.log(f"[WARNING] Failed to install FoliaPerms plugin: {e}")
-    
+
     def install_eventron_plugin(self, jar_path):
-        """Install Eventron plugin for Bukkit-based servers"""
+        """Install Eventron plugin for Bukkit-based servers (Modrinth)"""
         try:
-            if self.software not in ["Bukkit", "Spigot", "Paper", "Purpur", "Folia"]:
-                return
-            
-            server_dir = os.path.dirname(jar_path)
-            eventron_file = "data/internal/setup_plugins/Eventron-1.02.2.jar"
-            plugin_folder = os.path.join(server_dir, "plugins")
-            
-            if not os.path.exists(eventron_file):
-                self.log(f"[WARNING] Eventron plugin not found at {eventron_file}")
-                return
-            
-            os.makedirs(plugin_folder, exist_ok=True)
-            
-            import shutil
-            dest_file = os.path.join(plugin_folder, os.path.basename(eventron_file))
-            shutil.copy2(eventron_file, dest_file)
-            self.log(f"[SUCCESS] Installed {os.path.basename(eventron_file)} plugin")
-            
+            supported = {"Bukkit", "Spigot", "Paper", "Purpur", "Folia"}
+            if getattr(self, 'software', None) not in supported:
+                self.log(f"[INFO] Eventron not applicable for {getattr(self, 'software', None)}; skipping")
+                return None
+            return self.install_plugin_from_modrinth('eventron', jar_path)
         except Exception as e:
             self.log(f"[WARNING] Failed to install Eventron plugin: {e}")
+
+    def install_multimedia_plugin(self, jar_path):
+        """Install Multimedia plugin from Modrinth"""
+        try:
+            supported = {"Bukkit", "Spigot", "Paper", "Purpur", "Folia"}
+            if getattr(self, 'software', None) not in supported:
+                self.log(f"[INFO] Multimedia plugin not applicable for {getattr(self, 'software', None)}; skipping")
+                return None
+
+            return self.install_plugin_from_modrinth('multimedia', jar_path)
+        except Exception as e:
+            self.log(f"[WARNING] Failed to install Multimedia plugin: {e}")
+
+    def install_fabric_api(self, jar_path):
+        """Install Fabric API mod from Modrinth for Fabric servers.
+
+        Chooses the newest Fabric API version compatible with the selected
+        Minecraft version and places it into the `mods/` folder.
+        """
+        try:
+            if getattr(self, 'software', None) != 'Fabric':
+                self.log(f"[INFO] Fabric API not applicable for {getattr(self, 'software', None)}; skipping")
+                return None
+
+            self.log(f"[INFO] Attempting to install Fabric API for game version {self.version}...")
+            return self.install_plugin_from_modrinth('fabric-api', jar_path)
+        except Exception as e:
+            self.log(f"[WARNING] Failed to install Fabric API: {e}")
+
+    def install_plugin_from_modrinth(self, slug: str, jar_path: str, platform_hint: str | None = None):
+        """Download the best matching plugin version from Modrinth and place it into the server's plugins/mods folder.
+
+        Returns the destination path on success, or None on failure.
+        """
+        try:
+            server_dir = os.path.dirname(jar_path)
+            if self.software in ["Fabric", "NeoForge", "Forge"]:
+                dest_folder = os.path.join(server_dir, 'mods')
+            else:
+                dest_folder = os.path.join(server_dir, 'plugins')
+
+            os.makedirs(dest_folder, exist_ok=True)
+
+            api_url = f"https://api.modrinth.com/v2/project/{slug}/version"
+            try:
+                versions = http.get_json(api_url, timeout=10)
+            except Exception as e:
+                self.log(f"[WARNING] Modrinth lookup failed for {slug}: {e}")
+                return None
+
+            if not versions:
+                self.log(f"[WARNING] No versions returned from Modrinth for {slug}")
+                return None
+
+            chosen = None
+
+            if platform_hint:
+                ph = platform_hint.lower()
+                matches = []
+                for v in versions:
+                    ver_num = (v.get('version_number') or '').lower()
+                    name = (v.get('name') or '').lower()
+                    if ver_num.endswith(f"-{ph}") or name.endswith(f"-{ph}"):
+                        matches.append(v)
+
+                if matches:
+                    for v in matches:
+                        gvs = v.get('game_versions', []) or []
+                        if self.version in gvs:
+                            chosen = v
+                            break
+                    if not chosen:
+                        chosen = matches[0]
+
+            if not chosen:
+                for v in versions:
+                    gvs = v.get('game_versions', []) or []
+                    if self.version in gvs:
+                        chosen = v
+                        break
+
+            if not chosen:
+                chosen = versions[0]
+
+            files = chosen.get('files', [])
+            try:
+                ver_label = chosen.get('version_number') or chosen.get('name') or '<unknown>'
+                self.log(f"[INFO] Modrinth selected version for {slug}: {ver_label} (id: {chosen.get('id')})")
+            except Exception:
+                pass
+            if not files:
+                self.log(f"[WARNING] No downloadable files found in selected Modrinth version for {slug}")
+                return None
+
+            jar_file = None
+            sw = getattr(self, 'software', None)
+            if sw in ["Fabric", "NeoForge", "Forge"]:
+                preferred_tokens = ['fabric', 'mod', 'mods']
+            elif sw in ["Velocity", "BungeeCord", "Waterfall"]:
+                preferred_tokens = ['velocity', 'bungee', 'waterfall', 'proxy']
+            elif sw == 'Folia':
+                preferred_tokens = ['folia']
+            else:
+                preferred_tokens = ['paper', 'bukkit', 'spigot', 'purpur', 'plugin']
+
+            if platform_hint:
+                ph = platform_hint.lower()
+                if ph not in preferred_tokens:
+                    preferred_tokens.insert(0, ph)
+
+            for f in files:
+                fn = (f.get('filename') or '').lower()
+                if fn.endswith('.jar') and any(tok in fn for tok in preferred_tokens):
+                    jar_file = f
+                    break
+
+            if not jar_file and sw not in ["Fabric", "NeoForge", "Forge"]:
+                for f in files:
+                    fn = (f.get('filename') or '').lower()
+                    if fn.endswith('.jar') and ('paper' in fn or 'bukkit' in fn or 'plugin' in fn):
+                        jar_file = f
+                        break
+
+            if not jar_file:
+                for f in files:
+                    fn = (f.get('filename') or '').lower()
+                    if fn.endswith('.jar'):
+                        jar_file = f
+                        break
+
+            if not jar_file:
+                self.log(f"[WARNING] No jar file available to download for {slug}")
+                return None
+
+            file_url = jar_file.get('url') or jar_file.get('download_url')
+            if not file_url:
+                self.log(f"[WARNING] Selected Modrinth file for {slug} has no download URL")
+                return None
+
+            filename = jar_file.get('filename') or os.path.basename(file_url)
+            dest_path = os.path.join(dest_folder, filename)
+
+            try:
+                self.log(f"[INFO] Modrinth selected file for {slug}: {filename}")
+            except Exception:
+                pass
+
+            self.log(f"[INFO] Downloading {slug} -> {os.path.basename(dest_path)}")
+            try:
+                self.download_with_progress(file_url, dest_path)
+            except Exception as e:
+                self.log(f"[WARNING] Failed to download {slug} file: {e}")
+                return None
+
+            self.log(f"[SUCCESS] Installed {slug} to {dest_folder}")
+            return dest_path
+        except Exception as e:
+            self.log(f"[WARNING] install_plugin_from_modrinth({slug}) failed: {e}")
+            return None
+
+
+class TemurinInstallThread(QThread):
+    """Background thread to download and install Temurin (Adoptium) JDKs.
+
+    Emits:
+    - log_signal(str)
+    - progress_signal(int, str)  # percent (or -1) and text
+    - finished_signal(bool, str)  # success, message/path
+    """
+    log_signal = pyqtSignal(str)
+    progress_signal = pyqtSignal(int, str)
+    finished_signal = pyqtSignal(bool, str)
+
+    def __init__(self, major: int, dest_dir: str, install_dir: str | None = None, set_java_home: bool = True):
+        super().__init__()
+        self.major = major
+        self.dest_dir = dest_dir
+        self.install_dir = install_dir
+        self.set_java_home = set_java_home
+
+    def run(self):
+        try:
+            self.log_signal.emit(f"[INFO] Starting Temurin download/install for Java {self.major}...")
+
+            def _cb(read, total):
+                try:
+                    if total:
+                        pct = int((read / total) * 100)
+                    else:
+                        pct = -1
+                except Exception:
+                    pct = -1
+                self.progress_signal.emit(pct, f"Downloaded {read} bytes")
+
+            path = temurin.download_temurin(self.major, self.dest_dir, progress_cb=_cb, install=True, install_dir=self.install_dir, set_java_home=self.set_java_home)
+            self.log_signal.emit(f"[SUCCESS] Temurin download/install finished: {path}")
+            self.finished_signal.emit(True, str(path))
+        except Exception as e:
+            self.log_signal.emit(f"[ERROR] Temurin install failed: {e}")
+            self.finished_signal.emit(False, str(e))
 
 
 class ServerLauncherGUI(QMainWindow):
@@ -1132,7 +1327,6 @@ class ServerLauncherGUI(QMainWindow):
             return os.path.join(os.path.expanduser('~'), 'yali_settings.json')
 
     def load_app_settings(self):
-        """Load settings from JSON and apply to UI and audio outputs."""
         path = self.get_settings_path()
         defaults = {
             'sfx_volume': 35,
@@ -1349,6 +1543,35 @@ class ServerLauncherGUI(QMainWindow):
                                 self._bg_player.play()
                         except Exception:
                             pass
+                except Exception:
+                    pass
+
+                try:
+                    sfx_enabled = bool(data.get('sfx_enabled', defaults['sfx_enabled']))
+                    sfx_val = max(0, min(100, int(data.get('sfx_volume', defaults['sfx_volume'])))) / 100.0
+                    try:
+                        if getattr(self, '_click_effect', None):
+                            try:
+                                if not sfx_enabled:
+                                    self._click_effect.setVolume(0.0)
+                                else:
+                                    self._click_effect.setVolume(sfx_val)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
+                    try:
+                        if getattr(self, '_click_output', None):
+                            try:
+                                if not sfx_enabled:
+                                    self._click_output.setVolume(0.0)
+                                else:
+                                    self._click_output.setVolume(sfx_val)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
                 except Exception:
                     pass
 
@@ -1611,15 +1834,45 @@ class ServerLauncherGUI(QMainWindow):
         config_group.setLayout(config_layout)
         install_layout.addWidget(config_group)
         
-        self.java_label = QLabel("Checking Java version...")
+        java_h = QHBoxLayout()
+        self.java_label = QLabel("Required: Java ?")
         self.java_label.setProperty('class', 'infoLabel')
-        install_layout.addWidget(self.java_label)
+        self.java_installed_label = QLabel("Checking Java...")
+        self.java_installed_label.setProperty('class', 'infoLabel')
+        self.java_installed_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        java_h.addWidget(self.java_label, 3)
+        java_h.addWidget(self.java_installed_label, 2)
+        install_layout.addLayout(java_h)
+
+        java_select_h = QHBoxLayout()
+        java_select_label = QLabel("Use Java:")
+        java_select_label.setMinimumWidth(150)
+        self.java_combo = QComboBox()
+        self.java_combo.setObjectName('javaCombo')
+        self.java_combo.setToolTip('Select Java executable to use for the server start script')
+        self.java_combo.setEnabled(False)
+        java_select_h.addWidget(java_select_label)
+        java_select_h.addWidget(self.java_combo)
+        install_layout.addLayout(java_select_h)
         
         self.download_button = QPushButton("Download Server")
         self.download_button.setMinimumHeight(40)
         self.download_button.setObjectName("downloadButton")
         self.download_button.clicked.connect(self.start_download)
-        install_layout.addWidget(self.download_button)
+
+        self.install_java_button = QPushButton("Install Java (Temurin)")
+        self.install_java_button.setMinimumHeight(40)
+        self.install_java_button.setObjectName("installJavaButton")
+        self.install_java_button.clicked.connect(self.start_install_java)
+        try:
+            self.install_java_button.setEnabled(False)
+        except Exception:
+            pass
+
+        btn_h = QHBoxLayout()
+        btn_h.addWidget(self.download_button)
+        btn_h.addWidget(self.install_java_button)
+        install_layout.addLayout(btn_h)
         
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
@@ -1724,12 +1977,20 @@ class ServerLauncherGUI(QMainWindow):
         self.start_button.setObjectName("startButton")
         self.start_button.clicked.connect(self.start_server)
         self.start_button.setEnabled(False)
+        try:
+            self.start_button.setStyleSheet("QPushButton:disabled { background-color: #2b2b2b; color: #7a7a7a; }")
+        except Exception:
+            pass
 
         self.stop_button = QPushButton("Stop Server")
         self.stop_button.setMinimumHeight(35)
         self.stop_button.setObjectName("stopButton")
         self.stop_button.clicked.connect(self.stop_server)
         self.stop_button.setEnabled(False)
+        try:
+            self.stop_button.setStyleSheet("QPushButton:disabled { background-color: #2b2b2b; color: #7a7a7a; }")
+        except Exception:
+            pass
 
         control_layout.addWidget(self.start_button)
         control_layout.addWidget(self.stop_button)
@@ -2663,7 +2924,7 @@ class ServerLauncherGUI(QMainWindow):
     def populate_versions(self):
         """Populate version dropdown"""
         versions = [
-            "1.21.10", "1.21.9", "1.21.8", "1.21.7", "1.21.6", "1.21.5", "1.21.4", "1.21.3", "1.21.2", "1.21.1", "1.21",
+            "1.21.11", "1.21.10", "1.21.9", "1.21.8", "1.21.7", "1.21.6", "1.21.5", "1.21.4", "1.21.3", "1.21.2", "1.21.1", "1.21",
             "1.20.6", "1.20.5", "1.20.4", "1.20.3", "1.20.2", "1.20.1", "1.20",
             "1.19.4", "1.19.3", "1.19.2", "1.19.1", "1.19",
             "1.18.2", "1.18.1", "1.18",
@@ -2716,9 +2977,139 @@ class ServerLauncherGUI(QMainWindow):
         """Handle version selection change"""
         if self.java_check_done:
             self.update_java_label()
+
+    def detect_all_java_installations(self):
+        """Scan common locations and PATH for java executables and record their major versions.
+
+        Populates `self.java_candidates` with dicts: {'major': int, 'path': str, 'source': str}
+        """
+        candidates = []
+
+        def run_and_parse(java_path, source_label):
+            try:
+                result = subprocess.run(
+                    [java_path, '-version'],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                )
+                out = (result.stderr or result.stdout) or ''
+                m = re.search(r'version\s+"?(\d+)(?:\.(\d+))?(?:\.(\d+))?', out)
+                if m:
+                    major = int(m.group(1))
+                    if major == 1 and m.group(2):
+                        major = int(m.group(2))
+                    candidates.append({'major': major, 'path': java_path, 'source': source_label})
+            except Exception:
+                return
+
+        try:
+            jh = os.environ.get('JAVA_HOME')
+            if jh:
+                jp = os.path.join(jh, 'bin', 'java.exe') if sys.platform == 'win32' else os.path.join(jh, 'bin', 'java')
+                if os.path.exists(jp):
+                    run_and_parse(jp, 'JAVA_HOME')
+        except Exception:
+            pass
+
+        try:
+            path_env = os.environ.get('PATH', '')
+            for p in path_env.split(os.pathsep):
+                if not p:
+                    continue
+                jp = os.path.join(p, 'java.exe') if sys.platform == 'win32' else os.path.join(p, 'java')
+                if os.path.exists(jp):
+                    run_and_parse(jp, 'PATH')
+        except Exception:
+            pass
+
+        if sys.platform == 'win32':
+            roots = []
+            try:
+                roots.append(os.environ.get('ProgramFiles', r'C:\Program Files'))
+            except Exception:
+                pass
+            try:
+                roots.append(os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)'))
+            except Exception:
+                pass
+
+            for root in [r for r in roots if r]:
+                try:
+                    for child in os.listdir(root):
+                        child_path = os.path.join(root, child)
+                        if not os.path.isdir(child_path):
+                            continue
+                        jp = os.path.join(child_path, 'bin', 'java.exe')
+                        if os.path.exists(jp):
+                            run_and_parse(jp, 'ProgramFiles')
+                except Exception:
+                    continue
+
+            try:
+                user_home = os.path.expanduser('~')
+                user_roots = [
+                    os.path.join(user_home, '.local', 'opt'),
+                    os.path.join(user_home, '.jdks'),
+                    os.path.join(user_home, 'jdk'),
+                    os.path.join(user_home, 'java'),
+                ]
+                for root in user_roots:
+                    if not root or not os.path.isdir(root):
+                        continue
+                    try:
+                        for child in os.listdir(root):
+                            child_path = os.path.join(root, child)
+                            if not os.path.isdir(child_path):
+                                continue
+                            jp = os.path.join(child_path, 'bin', 'java.exe') if sys.platform == 'win32' else os.path.join(child_path, 'bin', 'java')
+                            if os.path.exists(jp):
+                                run_and_parse(jp, 'UserLocal')
+                    except Exception:
+                        continue
+
+                try:
+                    for child in os.listdir(user_home):
+                        child_path = os.path.join(user_home, child)
+                        if not os.path.isdir(child_path):
+                            continue
+                        if re.search(r'(?i)^(jdk|openjdk|temurin|adoptium|adoptopenjdk|java)', child):
+                            jp = os.path.join(child_path, 'bin', 'java.exe') if sys.platform == 'win32' else os.path.join(child_path, 'bin', 'java')
+                            if os.path.exists(jp):
+                                run_and_parse(jp, 'UserHome')
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        seen = set()
+        uniq = []
+        for c in candidates:
+            key = (c.get('major'), os.path.normcase(os.path.abspath(c.get('path'))))
+            if key in seen:
+                continue
+            seen.add(key)
+            uniq.append(c)
+
+        self.java_candidates = uniq
+        try:
+            if hasattr(self, 'refresh_java_selection'):
+                try:
+                    self.refresh_java_selection()
+                except Exception:
+                    pass
+        except Exception:
+            pass
     
     def check_java_version_once(self):
         """Check Java version once at startup"""
+        try:
+            self.java_candidates = []
+            self.detect_all_java_installations()
+        except Exception:
+            self.java_candidates = []
+
         try:
             result = subprocess.run(
                 ['java', '-version'],
@@ -2727,39 +3118,32 @@ class ServerLauncherGUI(QMainWindow):
                 timeout=5,
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
             )
-            
-            output = result.stderr
-            version_match = re.search(r'version\s+"?(\d+)\.?(\d+)?\.?(\d+)?', output)
-            
+            output = result.stderr or result.stdout or ''
+            version_match = re.search(r'version\s+"?(\d+)(?:\.(\d+))?(?:\.(\d+))?', output)
             if version_match:
                 major = int(version_match.group(1))
-                if major == 1:
-                    self.java_version = int(version_match.group(2)) if version_match.group(2) else 0
+                if major == 1 and version_match.group(2):
+                    self.java_version = int(version_match.group(2))
                 else:
                     self.java_version = major
             else:
                 self.java_version = None
-                
-        except FileNotFoundError:
+        except Exception:
             self.java_version = None
-        except Exception as e:
-            self.java_version = None
-        
+
         self.java_check_done = True
-        self.update_java_label()
+        try:
+            self.update_java_label()
+        except Exception:
+            pass
     
     def update_java_label(self):
         """Update Java label based on current selection"""
-        if self.java_version is None:
-            self.java_label.setText("✗ Java not found - Please install Java from https://adoptium.net/")
-            self._set_widget_state(self.java_label, 'state', 'error')
-            return
-        
         version = self.version_combo.currentText()
         parts = version.split('.')
-        minor = int(parts[1]) if len(parts) > 1 else 0
-        patch = int(parts[2]) if len(parts) > 2 else 0
-        
+        minor = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+        patch = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+
         required_java = 8
         if minor <= 16:
             required_java = 8
@@ -2771,13 +3155,104 @@ class ServerLauncherGUI(QMainWindow):
             required_java = 21 if patch >= 5 else 17
         elif minor >= 21:
             required_java = 21
-            
-        if self.java_version >= required_java:
-            self.java_label.setText(f"✓ Java {self.java_version} detected (Required: Java {required_java}+)")
-            self._set_widget_state(self.java_label, 'state', 'ok')
-        else:
-            self.java_label.setText(f"⚠ Java {self.java_version} detected - Java {required_java}+ required for MC {version}")
-            self._set_widget_state(self.java_label, 'state', 'warn')
+
+        try:
+            self.java_label.setText(f"Required: Java {required_java}+")
+        except Exception:
+            pass
+
+        try:
+            candidates = getattr(self, 'java_candidates', []) or []
+
+            exact = next((c for c in candidates if c.get('major') == required_java), None)
+
+            ge = next((c for c in candidates if c.get('major') >= required_java), None)
+
+            path_java = getattr(self, 'java_version', None)
+
+            if exact:
+                p = exact.get('path')
+                m = exact.get('major')
+                short = os.path.basename(os.path.dirname(os.path.dirname(p))) if p else p
+                self.java_installed_label.setText(f"✓ Java {m} found ({short})")
+                self._set_widget_state(self.java_installed_label, 'state', 'ok')
+                try:
+                    if hasattr(self, 'download_button'):
+                        self.download_button.setEnabled(True)
+                        self.download_button.setToolTip("")
+                        try:
+                            self._set_widget_state(self.download_button, 'state', 'enabled')
+                        except Exception:
+                            pass
+                        try:
+                            if hasattr(self, 'install_java_button'):
+                                self.install_java_button.setEnabled(False)
+                                self.install_java_button.setToolTip("")
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                return
+
+            self.java_installed_label.setText(f"✗ Java {required_java} not found!")
+            self._set_widget_state(self.java_installed_label, 'state', 'error')
+            try:
+                if hasattr(self, 'download_button'):
+                    self.download_button.setEnabled(False)
+                    self.download_button.setToolTip(f"Requires Java {required_java}; not found on this system")
+                    try:
+                        self.download_button.setStyleSheet(
+                            "QPushButton:disabled { background-color: #2b2b2b; color: #7a7a7a; }"
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        self._set_widget_state(self.download_button, 'state', 'disabled')
+                    except Exception:
+                        pass
+                    try:
+                        if hasattr(self, 'install_java_button'):
+                            self.install_java_button.setEnabled(True)
+                            self.install_java_button.setToolTip(f"Download and install Java {required_java} (Temurin)")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        except Exception:
+            try:
+                self.java_installed_label.setText("✗ Java detection error")
+                self._set_widget_state(self.java_installed_label, 'state', 'error')
+            except Exception:
+                pass
+
+    def refresh_java_selection(self):
+        """Populate the `self.java_combo` combobox from `self.java_candidates`."""
+        try:
+            combo = getattr(self, 'java_combo', None)
+            if combo is None:
+                return
+            combo.blockSignals(True)
+            combo.clear()
+            candidates = getattr(self, 'java_candidates', []) or []
+            for c in candidates:
+                path = c.get('path')
+                major = c.get('major')
+                try:
+                    short = os.path.basename(os.path.dirname(os.path.dirname(path))) if path else path
+                except Exception:
+                    short = path
+                label = f"Java {major} — {short}"
+                combo.addItem(label, path)
+            if combo.count() > 0:
+                combo.setEnabled(True)
+                combo.setCurrentIndex(0)
+            else:
+                combo.addItem("(No JDKs detected)", None)
+                combo.setEnabled(False)
+            combo.blockSignals(False)
+        except Exception:
+            pass
     
     def browse_directory(self):
         """Open directory browser"""
@@ -2872,6 +3347,11 @@ class ServerLauncherGUI(QMainWindow):
             self.server_jar_path = chosen
             self.server_directory = directory
             self.start_button.setEnabled(True)
+            try:
+                self.start_button.setStyleSheet("")
+                self.stop_button.setStyleSheet("")
+            except Exception:
+                pass
             self.load_settings_button.setEnabled(True)
             self.save_settings_button.setEnabled(True)
             self.refresh_addons_button.setEnabled(True)
@@ -2908,6 +3388,11 @@ class ServerLauncherGUI(QMainWindow):
             self.server_jar_path = None
             self.server_directory = None
             self.start_button.setEnabled(False)
+            try:
+                self.start_button.setStyleSheet("QPushButton:disabled { background-color: #2b2b2b; color: #7a7a7a; }")
+                self.stop_button.setStyleSheet("QPushButton:disabled { background-color: #2b2b2b; color: #7a7a7a; }")
+            except Exception:
+                pass
             self.load_settings_button.setEnabled(False)
             self.save_settings_button.setEnabled(False)
             self.refresh_addons_button.setEnabled(False)
@@ -3062,7 +3547,50 @@ class ServerLauncherGUI(QMainWindow):
         self.progress_bar.setVisible(True)
         self.progress_label.setVisible(True)
         
-        self.download_thread = DownloadThread(version, software, directory, ram)
+        java_exe = None
+        try:
+            if hasattr(self, 'java_combo') and self.java_combo.isEnabled() and self.java_combo.currentIndex() >= 0:
+                sel = self.java_combo.currentData()
+                if sel:
+                    java_exe = sel
+        except Exception:
+            java_exe = None
+
+        try:
+            parts = version.split('.')
+            minor = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+            patch = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+
+            required_java = 8
+            if minor <= 16:
+                required_java = 8
+            elif minor == 17:
+                required_java = 16
+            elif minor == 18 or minor == 19:
+                required_java = 17
+            elif minor == 20:
+                required_java = 21 if patch >= 5 else 17
+            elif minor >= 21:
+                required_java = 21
+
+            candidates = getattr(self, 'java_candidates', []) or []
+            exact = next((c for c in candidates if c.get('major') == required_java), None)
+            ge = next((c for c in candidates if c.get('major') >= required_java), None)
+            if not java_exe:
+                if exact:
+                    java_exe = exact.get('path')
+                elif ge:
+                    java_exe = ge.get('path')
+            else:
+                jh = os.environ.get('JAVA_HOME')
+                if jh:
+                    java_exe_try = os.path.join(jh, 'bin', 'java.exe') if sys.platform == 'win32' else os.path.join(jh, 'bin', 'java')
+                    if os.path.exists(java_exe_try):
+                        java_exe = java_exe_try
+        except Exception:
+            java_exe = None
+
+        self.download_thread = DownloadThread(version, software, directory, ram, java_exe)
         self.download_thread.log_signal.connect(self.log)
         self.download_thread.progress_signal.connect(self.update_progress)
         self.download_thread.finished_signal.connect(self.download_finished)
@@ -3125,6 +3653,85 @@ class ServerLauncherGUI(QMainWindow):
                 "Download Failed",
                 f"Failed to download server:\n\n{message}"
             )
+
+    def start_install_java(self):
+        """Begin the Temurin download+install process for the required Java major."""
+        try:
+            version = self.version_combo.currentText()
+            parts = version.split('.')
+            minor = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+
+            required_java = 8
+            if minor <= 16:
+                required_java = 8
+            elif minor == 17:
+                required_java = 16
+            elif minor == 18 or minor == 19:
+                required_java = 17
+            elif minor == 20:
+                patch = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+                required_java = 21 if patch >= 5 else 17
+            elif minor >= 21:
+                required_java = 21
+
+            dest = self.dir_input.text() or os.path.join(get_base_dir(), 'downloads')
+            os.makedirs(dest, exist_ok=True)
+
+            self.temurin_thread = TemurinInstallThread(required_java, dest, install_dir=None, set_java_home=True)
+            self.temurin_thread.log_signal.connect(self.log)
+            self.temurin_thread.progress_signal.connect(self.update_progress)
+            self.temurin_thread.finished_signal.connect(self._on_temurin_finished)
+            try:
+                self.install_java_button.setEnabled(False)
+            except Exception:
+                pass
+            try:
+                self.progress_bar.setVisible(True)
+                self.progress_label.setVisible(True)
+            except Exception:
+                pass
+            self.temurin_thread.start()
+        except Exception as e:
+            self.log(f"[ERROR] Failed to start Temurin installer: {e}")
+
+    def _on_temurin_finished(self, success: bool, message: str):
+        try:
+            try:
+                self.progress_bar.setVisible(False)
+                self.progress_label.setVisible(False)
+            except Exception:
+                pass
+            if success:
+                self.log(f"[INFO] Temurin install completed: {message}")
+                try:
+                    QMessageBox.information(self, "Java Installed", f"Java installed: {message}")
+                except Exception:
+                    pass
+                try:
+                    self.detect_all_java_installations()
+                except Exception:
+                    pass
+                try:
+                    self.refresh_java_selection()
+                except Exception:
+                    pass
+                try:
+                    self.update_java_label()
+                except Exception:
+                    pass
+            else:
+                self.log(f"[ERROR] Temurin install failed: {message}")
+                try:
+                    QMessageBox.warning(self, "Install Failed", f"Failed to install Java: {message}")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        finally:
+            try:
+                self.install_java_button.setEnabled(True)
+            except Exception:
+                pass
     
     def start_server(self):
         """Start the Minecraft server"""
@@ -3142,13 +3749,45 @@ class ServerLauncherGUI(QMainWindow):
         
         jar_name = os.path.basename(self.server_jar_path)
         args = ["-Xmx" + ram, "-Xms" + ram, "-jar", jar_name, "nogui"]
-        
+
+        java_cmd = "java"
+        try:
+            if hasattr(self, 'java_combo') and self.java_combo.isEnabled() and self.java_combo.currentIndex() >= 0:
+                sel = self.java_combo.currentData()
+                if sel:
+                    java_cmd = sel
+        except Exception:
+            pass
+
+        try:
+            if java_cmd and os.path.isdir(java_cmd):
+                java_cmd = os.path.join(java_cmd, 'bin', 'java.exe' if sys.platform == 'win32' else 'java')
+        except Exception:
+            pass
+
+        try:
+            if (not os.path.isabs(java_cmd)) or (isinstance(java_cmd, str) and not os.path.exists(java_cmd)):
+                jh = os.environ.get('JAVA_HOME')
+                if jh:
+                    candidate = os.path.join(jh, 'bin', 'java.exe' if sys.platform == 'win32' else 'java')
+                    if os.path.exists(candidate):
+                        java_cmd = candidate
+                if shutil is not None:
+                    try:
+                        found = shutil.which(java_cmd) if java_cmd else None
+                        if found:
+                            java_cmd = found
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
         self.console_output.clear()
-        self.console_output.append(f"Starting server: java {' '.join(args)}\n")
+        self.console_output.append(f"Starting server: {java_cmd} {' '.join(args)}\n")
         self.console_output.append("="*60 + "\n")
-        
+
         self.server_start_time = time.time()
-        self.server_process.start("java", args)
+        self.server_process.start(java_cmd, args)
         
         self.status_label.setText("Status: Starting...")
         self._set_widget_state(self.status_label, 'state', 'warn')
